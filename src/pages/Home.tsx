@@ -3,16 +3,16 @@ import { useNavigate } from 'react-router-dom';
 import { MapContainer, TileLayer, Marker, Popup, useMap } from 'react-leaflet';
 import L from 'leaflet';
 import { getCurrentUserGeo, getGeoByIP, GeoInfo } from '../api/geoApi';
+import historyApi, { SearchHistory } from '../api/historyApi';
 import { logout } from '../utils/auth';
+import Navigation from '../components/Navigation';
+import { HistoryItem } from '../types';
 import {
-  Search,
   X,
-  Menu,
   LogOut,
   Clock,
   Trash2,
   MapPin,
-  ChevronLeft,
   AlertCircle,
   CheckSquare,
   ChevronDown,
@@ -27,13 +27,6 @@ L.Icon.Default.mergeOptions({
   iconUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-icon.png',
   shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-shadow.png',
 });
-
-interface HistoryItem {
-  ip: string;
-  data: GeoInfo;
-  timestamp: Date;
-  selected?: boolean;
-}
 
 const MapUpdater: React.FC<{ center: [number, number] }> = ({ center }) => {
   const map = useMap();
@@ -58,6 +51,7 @@ const Home: React.FC = () => {
   const [isMobile, setIsMobile] = useState(window.innerWidth <= 768);
   const [isCardCollapsed, setIsCardCollapsed] = useState(false);
 
+  // Initialize refs with proper types
   const searchInputRef = useRef<HTMLInputElement>(null);
   const mobileInputRef = useRef<HTMLInputElement>(null);
   const dropdownRef = useRef<HTMLDivElement>(null);
@@ -79,8 +73,13 @@ const Home: React.FC = () => {
     return () => window.removeEventListener('resize', onResize);
   }, []);
 
-  useEffect(() => { loadCurrentUserGeo(); loadHistory(); }, []);
+  // Load initial data
+  useEffect(() => { 
+    loadCurrentUserGeo(); 
+    loadHistory(); 
+  }, []);
 
+  // Update map when search result or current geo changes
   useEffect(() => {
     const geo = searchResult || currentGeo;
     if (geo?.loc) {
@@ -112,28 +111,65 @@ const Home: React.FC = () => {
       const data = await getCurrentUserGeo();
       setCurrentGeo(data);
       setSearchResult(data);
-    } catch {
+    } catch (err) {
       setError('Failed to load your geolocation.');
     } finally {
       setInitialLoading(false);
     }
   };
 
-  const loadHistory = () => {
-    const saved = localStorage.getItem('geoSearchHistory');
-    if (saved) {
-      try {
-        const parsed = JSON.parse(saved).map((item: any) => ({
-          ...item,
-          timestamp: new Date(item.timestamp),
-        }));
-        setHistory(parsed);
-      } catch {}
+const loadHistory = async () => {
+  try {
+    const data = await historyApi.getHistory();
+    // console.log('History data:', data); // Debug log
+    
+    if (Array.isArray(data)) {
+      // Convert backend format to frontend format
+      const formattedHistory: HistoryItem[] = data.map(item => ({
+        id: item.id,
+        ip: item.ip_address,
+        data: {
+          ip: item.ip_address,
+          city: item.city || '',
+          region: item.region || '',
+          country: item.country || '',
+          loc: item.loc || '',
+          postal: item.postal || '',
+          timezone: item.timezone || '',
+          org: item.org || '',
+        },
+        timestamp: new Date(item.created_at),
+        selected: false,
+      }));
+      setHistory(formattedHistory);
+    } else {
+      console.error('Expected array but got:', typeof data);
+      setHistory([]);
     }
-  };
+  } catch (err) {
+    console.error('Failed to load history:', err);
+    setHistory([]); // Set empty array on error
+  }
+};
 
-  const saveHistory = (h: HistoryItem[]) => {
-    localStorage.setItem('geoSearchHistory', JSON.stringify(h));
+  const saveToHistory = async (ip: string, data: GeoInfo) => {
+    try {
+      await historyApi.createHistory({
+        ip_address: ip,
+        city: data.city,
+        region: data.region,
+        country: data.country,
+        loc: data.loc,
+        postal: data.postal,
+        timezone: data.timezone,
+        org: data.org,
+        raw_data: data,
+      });
+      // Reload history to get the updated list with correct IDs
+      await loadHistory();
+    } catch (err) {
+      console.error('Failed to save to history:', err);
+    }
   };
 
   const validateIP = (ip: string) =>
@@ -154,12 +190,10 @@ const Home: React.FC = () => {
       const data = await getGeoByIP(target);
       setSearchResult(data);
       setSearchIp(target);
-      setHistory(prev => {
-        const filtered = prev.filter(i => i.ip !== target);
-        const next = [{ ip: target, data, timestamp: new Date(), selected: false }, ...filtered].slice(0, 20);
-        saveHistory(next);
-        return next;
-      });
+      
+      // Save to backend history
+      await saveToHistory(target, data);
+      
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to fetch IP data.');
     } finally {
@@ -174,7 +208,10 @@ const Home: React.FC = () => {
     setShowDropdown(false);
   };
 
-  const handleLogout = () => { logout(); navigate('/login', { replace: true }); };
+  const handleLogout = () => { 
+    logout(); 
+    navigate('/login', { replace: true }); 
+  };
 
   const handleHistoryClick = (item: HistoryItem) => {
     setSearchResult(item.data);
@@ -185,9 +222,16 @@ const Home: React.FC = () => {
     setIsCardCollapsed(false);
   };
 
-  const handleHistoryDelete = (ip: string, e?: React.MouseEvent) => {
+  const handleHistoryDelete = async (id: number, e?: React.MouseEvent) => {
     e?.stopPropagation();
-    setHistory(prev => { const next = prev.filter(i => i.ip !== ip); saveHistory(next); return next; });
+    try {
+      await historyApi.deleteHistory(id);
+      // Remove from local state
+      setHistory(prev => prev.filter(i => i.id !== id));
+    } catch (err) {
+      console.error('Failed to delete history item:', err);
+      setError('Failed to delete history item.');
+    }
   };
 
   const toggleSelectMode = () => {
@@ -195,15 +239,39 @@ const Home: React.FC = () => {
     if (selectMode) setHistory(prev => prev.map(i => ({ ...i, selected: false })));
   };
 
-  const toggleSelect = (ip: string) =>
-    setHistory(prev => prev.map(i => i.ip === ip ? { ...i, selected: !i.selected } : i));
+  const toggleSelect = (id: number) =>
+    setHistory(prev => prev.map(i => i.id === id ? { ...i, selected: !i.selected } : i));
 
-  const deleteSelected = () => {
-    setHistory(prev => { const next = prev.filter(i => !i.selected); saveHistory(next); return next; });
-    setSelectMode(false);
+  const deleteSelected = async () => {
+    const selectedIds = history.filter(i => i.selected).map(i => i.id);
+    if (selectedIds.length === 0) return;
+
+    try {
+      await historyApi.deleteMultipleHistory(selectedIds);
+      // Remove selected items from local state
+      setHistory(prev => prev.filter(i => !i.selected));
+      setSelectMode(false);
+    } catch (err) {
+      console.error('Failed to delete selected items:', err);
+      setError('Failed to delete selected items.');
+    }
+  };
+
+  const clearAllHistory = async () => {
+    if (!window.confirm('Are you sure you want to clear all history?')) return;
+    
+    try {
+      await historyApi.clearAllHistory();
+      setHistory([]);
+      setSelectMode(false);
+    } catch (err) {
+      console.error('Failed to clear history:', err);
+      setError('Failed to clear history.');
+    }
   };
 
   const formatTime = (d: Date) => d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  
   const formatDate = (d: Date) => {
     const diff = Math.floor((Date.now() - d.getTime()) / 86400000);
     if (diff === 0) return 'Today ' + formatTime(d);
@@ -239,162 +307,27 @@ const Home: React.FC = () => {
 
   return (
     <div className="app-container">
-
-      {/* ── HEADER ── */}
-      <header className="header">
-        {/* Left */}
-        <div className="header-left">
-          <button className="icon-btn" onClick={() => setSidebarOpen(true)} aria-label="Menu">
-            <Menu size={20} />
-          </button>
-          <div className="logo">
-            GEO<span className="logo-dot">.</span>IP<span className="logo-dot">.</span>APP
-          </div>
-        </div>
-
-        {/* Center — Desktop Search (only visible on desktop) */}
-        {!isMobile && (
-          <div className="header-center">
-            <div className="desktop-search" ref={dropdownRef}>
-              <form className="search-form" onSubmit={handleSearch}>
-                <span className="search-icon-left"><Search size={16} /></span>
-                <input
-                  ref={searchInputRef}
-                  type="text"
-                  className="search-input"
-                  placeholder="Enter IP address (e.g. 8.8.8.8)"
-                  value={searchIp}
-                  onChange={e => { setSearchIp(e.target.value); setShowDropdown(true); }}
-                  onFocus={() => setShowDropdown(true)}
-                  disabled={loading}
-                />
-                <div className="search-actions">
-                  {searchIp && (
-                    <button type="button" className="clear-btn" onClick={handleClear}>
-                      <X size={14} />
-                    </button>
-                  )}
-                  <button type="submit" className="search-submit" disabled={loading}>
-                    {loading ? '...' : 'LOCATE'}
-                  </button>
-                </div>
-              </form>
-
-              {showDropdown && filteredHistory.length > 0 && (
-                <div className="search-dropdown">
-                  <div className="dropdown-label">
-                    <Clock size={12} /> Recent Searches
-                  </div>
-                  {filteredHistory.slice(0, 6).map(item => (
-                    <div
-                      key={item.ip + item.timestamp.getTime()}
-                      className="dropdown-item"
-                      onMouseDown={() => { handleHistoryClick(item); setShowDropdown(false); }}
-                    >
-                      <span className="dropdown-item-icon"><MapPin size={13} /></span>
-                      <div className="dropdown-item-info">
-                        <span className="dropdown-item-ip">{item.ip}</span>
-                        <span className="dropdown-item-loc">{item.data.city}, {item.data.country}</span>
-                      </div>
-                      <span className="dropdown-item-time">{formatTime(item.timestamp)}</span>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          </div>
-        )}
-
-        {/* Right */}
-        <div className="header-right">
-          {/* Mobile search trigger */}
-          {isMobile && (
-            <button
-              className="icon-btn mobile-search-trigger"
-              onClick={() => setMobileSearchOpen(true)}
-              aria-label="Search"
-            >
-              <Search size={20} />
-            </button>
-          )}
-        </div>
-      </header>
-
-      {/* ── MOBILE SEARCH OVERLAY ── */}
-      {mobileSearchOpen && (
-        <div className="mobile-search-overlay">
-          <div className="mobile-search-bar">
-            <button className="icon-btn" onClick={() => setMobileSearchOpen(false)}>
-              <ChevronLeft size={20} />
-            </button>
-            <form
-              className="search-form"
-              style={{ flex: 1 }}
-              onSubmit={e => handleSearch(e)}
-            >
-              <span className="search-icon-left"><Search size={16} /></span>
-              <input
-                ref={mobileInputRef}
-                type="text"
-                className="search-input"
-                placeholder="Enter IP address..."
-                value={searchIp}
-                onChange={e => setSearchIp(e.target.value)}
-                disabled={loading}
-              />
-              {searchIp && (
-                <div className="search-actions">
-                  <button type="button" className="clear-btn" onClick={() => setSearchIp('')}>
-                    <X size={14} />
-                  </button>
-                </div>
-              )}
-            </form>
-            <button
-              className="mobile-submit-btn"
-              onClick={() => handleSearch()}
-              disabled={loading}
-            >
-              {loading ? '...' : 'GO'}
-            </button>
-          </div>
-
-          <div className="mobile-history-list">
-            <div className="mobile-history-section-label">
-              <span>Recent Searches</span>
-              {history.length > 0 && (
-                <button className="mobile-clear-all" onClick={() => { setHistory([]); saveHistory([]); }}>
-                  Clear all
-                </button>
-              )}
-            </div>
-
-            {filteredHistory.length === 0 ? (
-              <div className="mobile-no-history">
-                <Clock size={32} opacity={0.3} />
-                <p>No recent searches</p>
-              </div>
-            ) : (
-              filteredHistory.map(item => (
-                <div
-                  key={item.ip + item.timestamp.getTime()}
-                  className="mobile-history-item"
-                  onClick={() => handleHistoryClick(item)}
-                >
-                  <div className="mobile-history-icon">
-                    <MapPin size={16} />
-                  </div>
-                  <div className="mobile-history-content">
-                    <span className="mobile-history-ip">{item.ip}</span>
-                    <span className="mobile-history-loc">{item.data.city}, {item.data.region}, {item.data.country}</span>
-                  </div>
-                  <span className="mobile-history-time">{formatTime(item.timestamp)}</span>
-                </div>
-              ))
-            )}
-          </div>
-        </div>
-      )}
+      {/* Navigation Component */}
+      <Navigation
+        sidebarOpen={sidebarOpen}
+        setSidebarOpen={setSidebarOpen}
+        mobileSearchOpen={mobileSearchOpen}
+        setMobileSearchOpen={setMobileSearchOpen}
+        isMobile={isMobile}
+        searchIp={searchIp}
+        setSearchIp={setSearchIp}
+        loading={loading}
+        handleSearch={handleSearch}
+        handleClear={handleClear}
+        showDropdown={showDropdown}
+        setShowDropdown={setShowDropdown}
+        filteredHistory={filteredHistory}
+        handleHistoryClick={handleHistoryClick}
+        formatTime={formatTime}
+        dropdownRef={dropdownRef}
+        searchInputRef={searchInputRef}
+        mobileInputRef={mobileInputRef}
+      />
 
       {/* ── MAIN CONTENT ── */}
       <main className="main-content">
@@ -470,6 +403,10 @@ const Home: React.FC = () => {
                 <span className="card-label">Timezone</span>
                 <span className="card-value">{displayGeo.timezone}</span>
               </div>
+              <div className="card-row">
+                <span className="card-label">Provider</span>
+                <span className="card-value">{displayGeo.org}</span>
+              </div>
             </div>
           </div>
         )}
@@ -506,9 +443,14 @@ const Home: React.FC = () => {
                 <div className="history-toolbar-actions">
                   {!selectMode ? (
                     history.length > 0 && (
-                      <button className="toolbar-btn" onClick={toggleSelectMode}>
-                        <CheckSquare size={13} /> Select
-                      </button>
+                      <>
+                        <button className="toolbar-btn" onClick={toggleSelectMode}>
+                          <CheckSquare size={13} /> Select
+                        </button>
+                        <button className="toolbar-btn danger" onClick={clearAllHistory}>
+                          <Trash2 size={13} /> Clear All
+                        </button>
+                      </>
                     )
                   ) : (
                     <>
@@ -516,7 +458,7 @@ const Home: React.FC = () => {
                       <button className="toolbar-btn" onClick={() => setHistory(prev => prev.map(i => ({ ...i, selected: false })))}>None</button>
                       {selectedCount > 0 && (
                         <button className="toolbar-btn danger" onClick={deleteSelected}>
-                          <Trash2 size={13} /> {selectedCount}
+                          <Trash2 size={13} /> Delete ({selectedCount})
                         </button>
                       )}
                       <button className="toolbar-btn" onClick={toggleSelectMode}>
@@ -533,7 +475,7 @@ const Home: React.FC = () => {
                 ) : (
                   history.map(item => (
                     <div
-                      key={item.ip + item.timestamp.getTime()}
+                      key={item.id}
                       className="history-entry"
                       onClick={() => !selectMode && handleHistoryClick(item)}
                     >
@@ -542,7 +484,7 @@ const Home: React.FC = () => {
                           type="checkbox"
                           className="history-entry-checkbox"
                           checked={item.selected || false}
-                          onChange={() => toggleSelect(item.ip)}
+                          onChange={() => toggleSelect(item.id)}
                           onClick={e => e.stopPropagation()}
                         />
                       )}
@@ -556,7 +498,7 @@ const Home: React.FC = () => {
                       {!selectMode && (
                         <button
                           className="history-entry-del"
-                          onClick={e => handleHistoryDelete(item.ip, e)}
+                          onClick={e => handleHistoryDelete(item.id, e)}
                         >
                           <X size={14} />
                         </button>

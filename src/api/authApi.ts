@@ -1,6 +1,4 @@
-import axios, { AxiosError } from 'axios';
-
-const API_URL = process.env.REACT_APP_API_URL;
+import api from './api';
 
 export interface LoginCredentials {
   email: string;
@@ -18,12 +16,18 @@ export interface LoginResponse {
 
 export const login = async (credentials: LoginCredentials): Promise<LoginResponse> => {
   try {
-    const response = await axios.post<LoginResponse>(`${API_URL}/login`, credentials);
+    const response = await api.post('/login', credentials);
     return response.data;
   } catch (error) {
-    if (axios.isAxiosError(error) && error.response) {
-      throw new Error(error.response.data.message || 'Login failed');
-    }
-    throw new Error('Network error');
+    console.error('Login error:', error);
+    throw new Error('Invalid email or password');
+  }
+};
+
+export const logout = async (): Promise<void> => {
+  try {
+    await api.post('/logout');
+  } catch (error) {
+    console.error('Logout error:', error);
   }
 };
